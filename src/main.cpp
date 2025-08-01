@@ -28,9 +28,7 @@ const int SD_CS_PIN = 5;
 #define PMS_RX_PIN 16
 #define PMS_TX_PIN 17
 
-// GDK101 시리얼 핀
-#define GDK101_RX_PIN 18
-#define GDK101_TX_PIN 19
+// GDK101 I2C 통신 사용
 
 #define INTERNAL_TEMP_LIMIT_LOW -45.0 // 예시 임계치(℃), 필요시 조정 (영하 45도 이하)
 unsigned long lastSensorRestart = 0;
@@ -45,6 +43,16 @@ unsigned long lastSlowUpdate = 0;
 
 bool sensorsActive = true; // 센서 측정 활성화 플래그
 
+// GDK101 I2C 통신 함수
+void Gamma_Mod_Read(int cmd) {
+  Wire.beginTransmission(GDK101_ADDR);
+  Wire.write(cmd);
+  Wire.endTransmission();
+  delay(10);
+  Wire.requestFrom(GDK101_ADDR, 2); // 항상 2바이트 반환
+  for(byte i = 0; i < 2 && Wire.available(); i++) gdkBuffer[i] = Wire.read();
+}
+
 // 센서 객체 선언
 Adafruit_BME680 bme;
 DFRobot_OzoneSensor ozone;
@@ -54,7 +62,8 @@ OneWire oneWire(DS18B20_PIN);
 DallasTemperature sensors(&oneWire);
 HardwareSerial pmsSerial(1); // UART1
 PMS pms(pmsSerial);
-HardwareSerial gdkSerial(2); // UART2
+// GDK101 I2C 통신용 변수
+byte gdkBuffer[2] = {0, 0};
 BMI270 bmi270;
 
 // 센서 데이터 구조체
@@ -67,7 +76,7 @@ struct SensorData {
   float mlx_x, mlx_y, mlx_z;
   float bmi_x, bmi_y, bmi_z;
   uint16_t pms_1_0, pms_2_5, pms_10;
-  String gdk101;
+  float gdk101;
   float ozone;
 };
 
@@ -75,7 +84,6 @@ void setup() {
   Serial.begin(115200);
   Wire.begin();
   pmsSerial.begin(9600, SERIAL_8N1, PMS_RX_PIN, PMS_TX_PIN);
-  gdkSerial.begin(9600, SERIAL_8N1, GDK101_RX_PIN, GDK101_TX_PIN);
 
   if (!SD.begin(SD_CS_PIN)) {
     Serial.println("SD 카드 초기화 실패");
@@ -137,13 +145,10 @@ void loop() {
     }
 
     // 가속도(BMI270)
-    if (bmi270.getSensorData() == BMI2_OK) {
-      data.bmi_x = bmi270.data.accelX;
-      data.bmi_y = bmi270.data.accelY;
-      data.bmi_z = bmi270.data.accelZ;
-    } else {
-      data.bmi_x = data.bmi_y = data.bmi_z = -999;
-    }
+    bmi270.getSensorData(); // 센서 데이터 업데이트
+    data.bmi_x = bmi270.data.accelX;
+    data.bmi_y = bmi270.data.accelY;
+    data.bmi_z = bmi270.data.accelZ;
 
     // 미세먼지(PMS3003)
     PMS::DATA pmsData;
@@ -155,15 +160,9 @@ void loop() {
       data.pms_1_0 = data.pms_2_5 = data.pms_10 = 0;
     }
 
-    // 공기질(GDK101)
-    data.gdk101 = "";
-    while (gdkSerial.available()) {
-      data.gdk101 += (char)gdkSerial.read();
-    }
-    if (data.gdk101.length() == 0) {
-      data.gdk101 = "ERROR";
-      gdkSerial.begin(9600, SERIAL_8N1, GDK101_RX_PIN, GDK101_TX_PIN);
-    }
+    // 공기질(GDK101) - I2C 통신
+    Gamma_Mod_Read(0xB3); // 1분 평균 읽기
+    data.gdk101 = gdkBuffer[0] + gdkBuffer[1] / 100.0; // uSv/h 단위
 
     // 오존(DFRobot_OzoneSensor)
     float ozoneVal = ozone.readOzoneData();
@@ -203,7 +202,7 @@ void printSensorData(const SensorData& d) {
   Serial.print("[PMS3003] PM1.0: "); Serial.print(d.pms_1_0);
   Serial.print(" ug/m3, PM2.5: "); Serial.print(d.pms_2_5);
   Serial.print(" ug/m3, PM10: "); Serial.println(d.pms_10);
-  Serial.print("[GDK101] 공기질: "); Serial.println(d.gdk101);
+  Serial.print("[GDK101] 방사선: "); Serial.print(d.gdk101); Serial.println(" uSv/h");
   Serial.print("[Ozone] 오존: "); Serial.println(d.ozone);
 }
 
@@ -250,6 +249,11 @@ void ModuleInit() {
   
   // PMS 센서 활성화
   pms.activeMode();
+  
+  // GDK101 센서 초기화
+  Gamma_Mod_Read(0xB4); // 펌웨어 확인
+  Serial.print("GDK101 Firmware V: "); Serial.print(gdkBuffer[0]); Serial.print("."); Serial.println(gdkBuffer[1]);
+  Gamma_Mod_Read(0xA0); // 리셋
   
   Serial.println("모듈 초기화 완료");
 }
